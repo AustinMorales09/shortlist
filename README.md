@@ -86,14 +86,65 @@ Open http://localhost:3022, sign up, and click **Load a sample job with 4 applic
   - **Checks:** no horizontal scroll at phone width, no server errors, and `next build` passes.
 - **Not verified:** a live Claude call. The prompt's safeguards and output are only checked structurally (with a mocked client), not against the real model's behaviour. Before real use, the first runs should be reviewed, and ideally a bias audit run on real outcomes.
 
+## Integrations: Greenhouse and Google Calendar
+
+**Integrations** in the nav connects them, live or with the simulator.
+
+- **Greenhouse Recruiting** (`lib/integrations/greenhouse.ts`): Harvest API **v3** (v1/v2 were retired at the end of August 2026), with OAuth **client credentials** created in Greenhouse and pasted in, plus an optional "act as" user.
+  - **Linking:** link each Greenhouse job to a Shortlist job (an existing one, or a new one with the same title).
+  - **Importing:** applications created since the last import come in, with candidate details from `/v3/candidates` and the resume from `/v3/attachments`. Imports overlap by an hour, and nothing is imported twice.
+  - **Resumes:** the attachment link is short-lived and signed, so it's downloaded at once, never stored, and no API token is sent to the file host. Resumes that aren't PDF or text are noted.
+  - **Who's skipped or merged:** prospects (people who never applied) are skipped. Someone who applied both here and in Greenhouse is linked, not duplicated.
+  - **Comparison:** each import is compared with the job's criteria (optional per job).
+  - **Paging:** follows v3's rules. Filters go on the first request only; every next page is the `Link` URL exactly as given, because a cursor must be the only parameter.
+  - **Back to Greenhouse:** when a **person** moves an imported applicant to another stage, a private (`admin_only`) note with the decision and reason goes onto the Greenhouse candidate. Shortlist never changes the stage in Greenhouse.
+  - **Retries:** a note isn't idempotent and v3 has no way to look it up afterwards, so a 5xx on it isn't retried automatically (it may have been saved). It's marked failed, with a message to check before retrying.
+- **Google Calendar** (`lib/integrations/gcal.ts`, OAuth with PKCE and offline access): schedule from an applicant's page.
+  - **Conflict check:** the slot is checked with **free/busy** first. If you're busy, you're asked before booking, and a changed time is checked again.
+  - **The event:** it's created on your calendar in your organisation's time zone, with a Google Meet link and invitations to the candidate and any interviewers (`sendUpdates=all`).
+  - **No double invites:** the event id is derived from the applicant and the start time, so a repeat gets Google's 409 and reuses the event.
+  - **Cancelling:** sends cancellations; an event that's already gone (410) is fine.
+  - **Blind review:** for blind-review jobs, the identity must be revealed first, because the invitation goes to the candidate's email.
+  - **Audit log:** scheduling and cancelling are recorded there.
+
+| Env var | Effect |
+|---|---|
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Live Calendar connection (scopes `calendar.events`, `calendar.freebusy`, `openid email`; redirect URI `<APP_URL>/integrations/gcal/callback`). |
+| `INTEGRATIONS_KEY` | Key for sealing stored credentials (otherwise a key file is created in the data folder). |
+| `APP_URL` | Public base URL for the OAuth redirect URI. |
+
+Greenhouse needs no server configuration: each customer pastes their own Harvest v3 credentials.
+
+### How the integration layer works (`lib/integrations/core.ts`)
+
+The same small core sits under every provider:
+
+- **Credentials sealed at rest.** Tokens and API secrets are stored with AES-256-GCM, keyed by `INTEGRATIONS_KEY` (or a random key file next to the database). Disconnecting deletes them.
+- **OAuth done properly.** The state parameter is single-use, expires after 10 minutes and is bound to the person who started the flow. PKCE is used where the provider supports it.
+- **Token refresh.** Tokens refresh shortly before they expire, and once more on a 401. Parallel callers share a single refresh, because providers that rotate refresh tokens lock you out if two refreshes race.
+- **Retries that can't duplicate.** A 429 waits for `Retry-After`, and other 5xx errors back off. A POST is retried only when it is idempotent (an idempotency key, upsert or client-chosen id) or when the server said 429. Bad data fails right away with the reason instead of retrying.
+- **An outbox.** Work is queued in `integration_jobs`, keyed so the same work collapses into one job, and runs after the response has been sent (Next.js `after`). Pages never wait on a third-party API. Failed jobs show their error and can be retried.
+- **Links.** `integration_links` records which remote record each local record became, plus a hash of the values last synced. That is what makes re-syncs no-ops and lets two-way sync tell who changed what.
+- **A built-in simulator for every provider** (`lib/integrations/sim-*.ts`). "Try it with the simulator" connects without an account. The integration code is identical in both modes; only the fetch function differs. Each simulator speaks the provider's request and response shapes, validation and error codes. Every 6th call gets a 429 so the retry path runs for real, and "Expire the access token" exercises refresh-on-401.
+
+**Verified** (`npm test` runs `tests/integrations.mjs`, 9 checks, against the simulators):
+- **Greenhouse paging:** `Link` headers; `per_page` bounds; a 422 for a cursor combined with other parameters; open jobs only.
+- **Greenhouse import:** a PDF and a text resume are read and compared; the prospect is skipped; the `.docx` is noted; a second import adds nothing; a new application is imported; one that matches a form applicant is linked.
+- **Greenhouse notes:** a stage change sends an `admin_only` note to the right candidate. A 503 on a note fails without retrying, and doesn't mark the connection broken. A retry by a person after the token expired gets a new token and sends.
+- **Calendar:** wall-clock time to UTC across DST; the event-id alphabet; free/busy finds the blocked lunch hour and the booked interview; the booking invites the candidate and interviewer with Meet; a repeat creates no second event; cancelling twice is fine.
+- **In the browser, simulator mode:** connected both and linked a Greenhouse job, which imported 3 applications (the PDF resume read and redacted for blind review). Moved one to Interview, which put a note in Greenhouse. Revealed the identity, asked for 12:15 and got "busy 12:00–1:00 PM", changed to 10:00, and booked it with a Meet link and two invitations.
+
+**Not verified:** calls to the real Greenhouse and Google APIs. The Greenhouse v3 details (form-encoded token request, comma-separated id lists, a bare-array list response, which the client also accepts wrapped) follow the published v3 reference and should be confirmed on the first live run. v3 documents no webhook signature yet, so imports are pulled ("Run queued jobs", or after linking) rather than pushed.
+
 ## Stack
 
-Next.js 16 · `node:sqlite` · `@anthropic-ai/sdk` + `zod` · plain CSS.
+Next.js 16 · `node:sqlite` · `@anthropic-ai/sdk` + `zod` · Greenhouse Harvest v3 and Google Calendar over plain `fetch` · plain CSS.
 
 ## Next steps toward a paid product
 
 - Adverse-impact reporting by stage (the four-fifths rule) using voluntary, separately stored demographic self-identification, which never reaches reviewers or the model
 - Structured interview kits generated from the criteria, with per-criterion interviewer scorecards
 - Multiple reviewers with independent first reads before discussion, and identity-reveal permissions by role
-- ATS integrations (Greenhouse, Lever, Workable) and job-board posting
+- More ATSs (Lever, Workable), scheduled imports, and job-board posting
+- Outlook / Microsoft 365 calendars alongside Google
 - Retention schedules for automatic deletion of declined applications, configurable per jurisdiction

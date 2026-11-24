@@ -6,10 +6,12 @@ import path from "node:path";
 import { redirect } from "next/navigation";
 import { db, filesDir, logEvent, STAGES, tx, type JobRow, type Question, type Stage } from "./db";
 import { createSession, destroySession, hashPassword, verifyPassword } from "./auth";
-import { MAX_RESUME, myOrg, ownApplicant, ownJob, sniffResume, storeFile } from "./access";
+import { MAX_RESUME, myOrg, ownApplicant, ownJob, sniffResume } from "./access";
 import { sendEmail, validEmail } from "./mail";
-import { pdfText } from "./pdftext";
 import { assessApplicant } from "./process";
+import { createApplication } from "./applications";
+import { stageChanged } from "./integrations/greenhouse";
+import "./integrations";
 import { parseCriteria, parseQuestions } from "./screen";
 
 const str = (f: FormData, k: string) => String(f.get(k) ?? "").trim();
@@ -113,6 +115,8 @@ export async function moveStage(form: FormData) {
   if (stage === "rejected" && !reason) redirect(`/applicants/${a.id}?error=${q("Pick a reason for not moving forward. It's kept on record.")}`);
   db.prepare("UPDATE applicants SET stage = ?, decision_reason = ?, decided_at = ? WHERE id = ?").run(stage, stage === "rejected" ? reason : "", Date.now(), a.id);
   logEvent(org.id, a.id, job.id, "user", `stage:${stage}`, `from ${a.stage}${reason ? `; reason: ${reason}` : ""}`);
+  const eventId = (db.prepare("SELECT MAX(id) AS id FROM events WHERE applicant_id = ?").get(a.id) as { id: number }).id;
+  await stageChanged(org.id, a.id, eventId, a.stage, stage, stage === "rejected" ? reason : "");
   if (stage === "rejected" && form.get("notify")) {
     await sendEmail({
       orgId: org.id, applicantId: a.id, to: a.email, subject: `Your application for ${job.title} at ${org.name}`,
@@ -153,20 +157,6 @@ export async function deleteApplicant(form: FormData) {
 }
 
 // ---------- public application form ----------
-
-async function createApplication(job: JobRow, f: { name: string; email: string; phone: string; text: string; file?: { name: string; mime: string; bytes: Buffer }; answers: Record<string, string>; optout: boolean }) {
-  const resumeText = f.file ? (f.file.mime === "application/pdf" ? pdfText(f.file.bytes) : f.file.bytes.toString("utf8")) : f.text;
-  const id = Number(db.prepare(
-    "INSERT INTO applicants (org_id, job_id, name, email, phone, resume_name, resume_mime, stored_as, resume_text, answers, ai_optout, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-  ).run(job.org_id, job.id, f.name, f.email, f.phone, f.file?.name ?? "", f.file?.mime ?? "", f.file ? storeFile(f.file.bytes) : "", resumeText.slice(0, 200_000), JSON.stringify(f.answers), f.optout ? 1 : 0, Date.now()).lastInsertRowid);
-  logEvent(job.org_id, id, job.id, "candidate", "applied", f.optout ? "Asked for a human-only review" : "");
-  try {
-    await assessApplicant(id);
-  } catch (err) {
-    db.prepare("UPDATE applicants SET error = ? WHERE id = ?").run(err instanceof Error ? err.message.slice(0, 300) : "Comparison failed", id);
-  }
-  return id;
-}
 
 export async function apply(form: FormData) {
   const slug = str(form, "slug");

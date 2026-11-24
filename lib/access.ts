@@ -1,9 +1,6 @@
-import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
 import { notFound } from "next/navigation";
 import { requireUser } from "./auth";
-import { db, filesDir, type ApplicantRow, type JobRow, type Org } from "./db";
+import { db, type ApplicantRow, type JobRow, type Org } from "./db";
 
 export async function myOrg(): Promise<Org> {
   const user = await requireUser();
@@ -28,17 +25,4 @@ export async function ownApplicant(id: number) {
 /** How an applicant is referred to on screen: a number while the job is blind and identity isn't revealed. */
 export const displayName = (a: Pick<ApplicantRow, "id" | "name" | "revealed">, job: Pick<JobRow, "blind">) => (job.blind && !a.revealed ? `Candidate #${a.id}` : a.name);
 
-export const MAX_RESUME = 5 * 1024 * 1024;
-
-/** Resume type from the file's own bytes: PDF or plain text only. */
-export function sniffResume(name: string, b: Buffer): string | null {
-  if (b.subarray(0, 5).toString("latin1") === "%PDF-") return "application/pdf";
-  if (/\.(txt|md)$/i.test(name) && !b.subarray(0, 4000).includes(0)) return "text/plain";
-  return null;
-}
-
-export function storeFile(bytes: Buffer): string {
-  const storedAs = crypto.randomBytes(16).toString("hex");
-  fs.writeFileSync(path.join(filesDir, storedAs), bytes);
-  return storedAs;
-}
+export { MAX_RESUME, sniffResume, storeFile } from "./files";

@@ -6,7 +6,8 @@
     "dev": "next dev -p 3022",
     "build": "next build",
     "start": "next start -p 3022",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.8.0",
