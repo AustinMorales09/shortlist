@@ -44,6 +44,7 @@ export default async function IntegrationsPage({ searchParams }: { searchParams:
       <h1>Integrations</h1>
       <p className="muted" style={{ marginTop: 0 }}>Bring applications in from your applicant tracking system, and book interviews on your calendar. People still make every decision.</p>
       {sp.error && <p className="error card">{sp.error}</p>}
+      {process.env.VERCEL === "1" && <p className="card small" style={{ borderStyle: "dashed" }}><strong>About this hosted demo:</strong> it runs on several servers that each keep their own copy of the data, so a connection or sync you just made may not appear on the next page you load. Run the app locally for the full walkthrough; the integration code is the same.</p>}
       {sp.done && <p className="ok-text small">{sp.done}</p>}
 
       <IntegrationCard p={greenhouse} c={gh} ownerId={org.id} describeJob={describe} liveConnect={ghLive}>
